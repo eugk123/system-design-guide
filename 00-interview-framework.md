@@ -6,6 +6,17 @@ can impose *structure* on ambiguity. Use the same 7-step loop every time so you 
 > Time budget for a 45-minute interview is in brackets at each step. Adjust, but never skip
 > requirements or estimation — skipping them is the #1 way senior candidates underperform.
 
+```mermaid
+flowchart TD
+    S1["1 · Functional Requirements<br/>use cases + non-goals · read vs write heavy?"] --> S2["2 · Non-Functional Reqs<br/>scale · latency p99 · CAP posture · durability"]
+    S2 --> S3["3 · Capacity Estimation<br/>QPS peak · storage · read:write ratio"]
+    S3 --> S4["4 · API Design<br/>endpoints · idempotency · pagination"]
+    S4 --> S5["5 · High-Level Design<br/>draw boxes · walk one write + one read path"]
+    S5 --> S6["6 · Deep Dive<br/>data model · shard key · bottleneck · the twist"]
+    S6 --> S7["7 · Bottlenecks & Failure Modes<br/>SPOFs · hot keys · 10x scale · retries"]
+    S7 --> R(["Recap: design + key tradeoffs + what to ship as v1"])
+```
+
 ---
 
 ## Step 1 — Scope & functional requirements [~5 min]

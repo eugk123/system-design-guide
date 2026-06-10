@@ -35,6 +35,23 @@ Cursor-based pagination (feeds change constantly; offset is wrong).
 
 ## Step 5 — High-level design & the central decision
 
+```mermaid
+flowchart LR
+    C(["Client"]) --> LB["Load Balancer"]
+    LB --> API["API / Web Servers"]
+
+    API -- "1 store post" --> PDB[("Post Store<br/>Cassandra")]
+    API -- "2 enqueue" --> Q["Fan-out Queue<br/>Kafka"]
+    Q --> WK["Fan-out Workers"]
+    WK -- "lookup followers" --> SG[("Social Graph")]
+    WK -- "push postId" --> FC[("Feed Cache<br/>Redis, per user")]
+
+    API -- "read feed" --> FC
+    API -- "pull celeb posts" --> PDB
+    API -- "hydrate content" --> PC[("Post Cache<br/>Redis")]
+    API -- "media" --> CDN["CDN / Blob Store"]
+```
+
 ### Two models for building a feed
 
 **Fan-out on write (push)** — when a user posts, **push** the post ID into the precomputed
@@ -49,6 +66,20 @@ recent posts from everyone they follow and merge them on the fly.
 - **Write** = cheap (one insert). **Read** = expensive (gather from many authors, merge-sort).
 - **Great for users who follow many / for celebrities**; bad for the common fast-read case.
 
+```mermaid
+flowchart TB
+    subgraph PUSH["Fan-out on WRITE (push) — fast reads, costly writes"]
+        direction LR
+        P1["Author posts"] --> P2["Write postId into<br/>every follower's feed"]
+        P2 --> P3["Feed read = O(1)"]
+    end
+    subgraph PULL["Fan-out on READ (pull) — cheap writes, costly reads"]
+        direction LR
+        R1["Author posts<br/>single write"] --> R2["At read time: gather<br/>posts from all followees"]
+        R2 --> R3["Merge + sort on the fly"]
+    end
+```
+
 ### The hybrid (the senior answer)
 - **Fan-out on write for normal users** (precompute feeds → fast reads for the 99%).
 - **Fan-out on read for celebrities** (don't push their posts to millions; instead, when a user
@@ -57,18 +88,42 @@ recent posts from everyone they follow and merge them on the fly.
 - This caps write amplification while keeping reads fast. Define "celebrity" by a follower
   threshold.
 
-```
-POST:
-  normal author  → enqueue fanout job → workers push postId into followers' feed caches
-  celebrity author → just store post; do NOT fan out
+```mermaid
+flowchart TD
+    POST["New post"] --> CELEB{"Author a<br/>celebrity?"}
+    CELEB -- "No (normal user)" --> FAN["Enqueue fan-out →<br/>workers push to<br/>followers' feeds"]
+    CELEB -- "Yes" --> STORE["Just store post<br/>(no fan-out)"]
 
-GET feed:
-  read precomputed feed (Redis)  ⊕  pull recent posts of followed celebrities  → merge → hydrate
+    READ["Open feed"] --> MERGE["Read precomputed feed (Redis)<br/>+ pull followed celebrities'<br/>recent posts"]
+    MERGE --> DONE["Merge → hydrate → return"]
 ```
 
 ## Step 6 — Deep dives
 
 ### Data model & stores
+
+```mermaid
+erDiagram
+    USER ||--o{ POST : authors
+    USER ||--o{ FOLLOW : follows
+    USER ||--|| FEED : has
+    POST {
+        long postId PK "Snowflake, time-sortable"
+        long authorId FK
+        text content
+        json mediaUrls
+        timestamp createdAt
+    }
+    FOLLOW {
+        long followerId FK
+        long followeeId FK
+    }
+    FEED {
+        long userId PK
+        list postIds "capped ~800, in Redis"
+    }
+```
+
 - **Posts**: `{ postId (Snowflake, time-sortable), authorId, content, mediaUrls, createdAt }`
   in a sharded store (Cassandra/DynamoDB or sharded SQL), **sharded by postId/authorId**.
 - **Social graph**: `follows(followerId, followeeId)` — sharded by followerId for "who I follow"
@@ -79,6 +134,25 @@ GET feed:
 - **Media**: blob store (S3) + **CDN**. Never put media bytes in the feed store.
 
 ### Fan-out pipeline
+
+```mermaid
+sequenceDiagram
+    actor U as Author
+    participant API
+    participant DB as Post Store
+    participant Q as Fan-out Queue
+    participant WK as Workers
+    participant FC as Feed Cache
+    U->>API: POST /posts
+    API->>DB: persist post (postId = Snowflake)
+    API->>Q: enqueue fan-out job
+    API-->>U: 200 OK (returns immediately)
+    Q->>WK: deliver job
+    WK->>WK: look up followers
+    WK->>FC: push postId into each follower's feed
+    Note over WK,FC: skip celebrities & dormant users
+```
+
 - Posting enqueues a fan-out job to a **queue/Kafka**; **workers** look up followers and push
   the postId into each follower's Redis feed. Async → posting returns instantly; absorbs spikes.
 - Workers are idempotent (at-least-once). Dead-letter failed fan-outs.
