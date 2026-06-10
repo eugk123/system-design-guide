@@ -51,6 +51,22 @@ empty bucket → reject.
   rate. Memory-cheap (store tokens + last-refill timestamp; refill lazily on access).
 - Used by AWS, Stripe, etc. The most common production choice.
 
+```mermaid
+flowchart TD
+    Start(["Request arrives"])
+    Refill["Refill tokens<br/>based on elapsed time"]
+    Check{"Tokens available?"}
+    Consume["Consume 1 token"]
+    Allow["Allow request"]
+    Reject["Reject (429)"]
+
+    Start --> Refill
+    Refill --> Check
+    Check -- "yes" --> Consume
+    Consume --> Allow
+    Check -- "no" --> Reject
+```
+
 ### 5. Leaky bucket
 Requests enter a queue (bucket) drained at a fixed rate; overflow is dropped.
 - **Pro**: smooths output to a **constant rate** (good for protecting a downstream that needs
@@ -60,8 +76,20 @@ Requests enter a queue (bucket) drained at a fixed rate; overflow is dropped.
 > (smooth, accurate). Name the tradeoff: bursts allowed vs strictly smoothed.
 
 ## Step 5 — Distributed design
-```
-Request → Gateway node (rule lookup) → Redis (atomic counter check) → allow / 429
+```mermaid
+flowchart LR
+    Client(["Client"])
+    Gateway["API Gateway<br/>(rate-limit middleware)"]
+    Decision{"Under limit?"}
+    App["App Servers"]
+    Reject["Return 429<br/>Too Many Requests"]
+    Redis[("Redis<br/>atomic INCR / Lua")]
+
+    Client --> Gateway
+    Gateway --> Decision
+    Decision -- "yes" --> App
+    Decision -- "no" --> Reject
+    Gateway <-- "read/write counters" --> Redis
 ```
 - Counters in **Redis** (in-memory, fast, shared). Key = `{clientId}:{rule}`; set a TTL = window.
 - **Atomicity is essential**: read-modify-write across concurrent requests must be atomic or
@@ -87,6 +115,23 @@ Request → Gateway node (rule lookup) → Redis (atomic counter check) → allo
 ### Race conditions
 - Naive `GET` then `SET` races under concurrency → use atomic `INCR`/Lua. This is the classic
   bug to call out.
+
+```mermaid
+sequenceDiagram
+    actor Client
+    participant Gateway as "API Gateway"
+    participant Redis as "Redis"
+
+    Client->>Gateway: Request
+    Gateway->>Redis: Atomic INCR + EXPIRE (or Lua script)
+    Note over Gateway,Redis: Single atomic step prevents<br/>read-modify-write races
+    Redis-->>Gateway: Current count
+    alt Under limit
+        Gateway-->>Client: Allow (forward to app)
+    else Over limit
+        Gateway-->>Client: 429 Too Many Requests
+    end
+```
 
 ### Response & UX
 - Return `429` + `Retry-After` + headers (`X-RateLimit-Limit/Remaining/Reset`) so clients can

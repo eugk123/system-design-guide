@@ -52,6 +52,27 @@ problem. The solutions all map 2D → 1D (or recursively partition space).
 - Choose precision (cell size) by the search radius. Simple, works with any KV/SQL store, easy
   to shard by geohash prefix.
 
+A "nearby" query reads the **center cell plus all 8 neighbors**, then filters by true distance —
+so a point just across a cell boundary isn't missed:
+
+```mermaid
+flowchart TD
+    subgraph Grid["3x3 grid of geohash cells (query reads all 9)"]
+        direction TB
+        NW["NW"]
+        N["N"]
+        NE["NE"]
+        W["W"]
+        C["Center<br/>(my cell)"]
+        E["E"]
+        SW["SW"]
+        S["S"]
+        SE["SE"]
+    end
+    Q(["Nearby Query"]) -- "read center + 8 neighbors" --> Grid
+    Grid -- "filter by true distance" --> Result["Nearby Results<br/>(boundary points kept)"]
+```
+
 ### 2. Quadtree (in-memory, adaptive density)
 - A tree that recursively splits a region into 4 quadrants until each leaf holds ≤ K points.
 - **Adapts to density**: dense areas (downtown) subdivide more; sparse areas stay coarse →
@@ -69,8 +90,21 @@ problem. The solutions all map 2D → 1D (or recursively partition space).
 > heavyweight option. Naming the tradeoffs is the senior signal.
 
 ### Static design (Yelp)
-```
-Client → LB → Geo service → Geohash index (in DB / Redis) → fetch place details → rank/filter
+```mermaid
+flowchart LR
+    Client(["Client"])
+    LB["Load Balancer"]
+    Geo["Geo Service"]
+    Index[("Geohash Index<br/>(DB / Redis)")]
+    Details["Fetch Place Details"]
+    Filter["Filter by Exact Distance<br/>(haversine) + Category"]
+    Rank["Rank Top N"]
+
+    Client --> LB --> Geo
+    Geo -- "compute geohash + neighbors" --> Index
+    Index -- "candidate place IDs" --> Details
+    Details --> Filter --> Rank
+    Rank -- "return places" --> Client
 ```
 - Places stored with geohash; query computes the caller's geohash + neighbors, fetches
   candidates, then filters by exact distance (haversine) and category, ranks, returns top N.
@@ -90,6 +124,24 @@ Client → LB → Geo service → Geohash index (in DB / Redis) → fetch place 
 - **Matching**: rider query → find candidate drivers in nearby cells (current + neighbors) →
   filter (available, capacity) → rank by distance/ETA → dispatch. Keep dispatch logic separate.
 - **Stale entries**: drivers that stop pinging expire via TTL (they went offline).
+
+```mermaid
+sequenceDiagram
+    participant Driver
+    participant Loc as "Location Service"
+    participant Redis as "In-Memory Geo Index (Redis)"
+    participant Geo as "Geo Service"
+    participant Rider
+
+    Driver->>Loc: "ping {driverId, lat, lng} (every ~4s)"
+    Loc->>Redis: "GEOADD (overwrite latest)"
+    Note over Driver,Redis: "Write firehose — millions of pings/sec;<br/>only latest location matters, so overwrite (don't append)"
+    Rider->>Geo: "GET /nearby (lat, lng, radius)"
+    Geo->>Redis: "GEOSEARCH nearby cells"
+    Redis-->>Geo: "candidate drivers"
+    Geo->>Geo: "filter (available) + rank by distance/ETA"
+    Geo-->>Rider: "dispatch nearest driver"
+```
 
 ## Step 7 — Bottlenecks & failure modes
 - **Dense-region hotspots** → adaptive cell sizing (quadtree) or finer geohash precision +

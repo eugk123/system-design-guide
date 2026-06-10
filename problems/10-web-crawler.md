@@ -28,15 +28,34 @@ Components communicate via **queues**. The "API" is the stage contract: URL in �
 content + extracted URLs out.
 
 ## Step 5 — High-level design (pipeline of stages connected by queues)
-```
-Seed URLs → [ URL Frontier (priority + politeness queues) ]
-   → Fetcher (downloads, respects robots/rate limits)
-   → Content parser (extract text + links)
-   → Dedup: content seen?  (checksum) → store if new
-   → URL extractor → URL seen? (dedup) → filter → back into Frontier
-   → Content store (blob) + metadata DB
+```mermaid
+flowchart LR
+    Seed["Seed URLs"] --> Frontier[("URL Frontier<br/>(priority + per-host<br/>politeness queues)")]
+    Frontier --> Fetcher["Fetcher<br/>(respects robots<br/>+ rate limits)"]
+    Fetcher --> Parser["Content parser<br/>(extract text + links)"]
+    Parser --> ContentDedup["Content dedup<br/>(checksum)"]
+    ContentDedup --> Blob[("Content store<br/>(blob)")]
+    ContentDedup --> Meta[("Metadata DB")]
+    Parser -- "extracted URLs" --> UrlDedup["URL-seen dedup<br/>(Bloom filter)"]
+    UrlDedup --> Filter["Filter"]
+    Filter -- "new URLs" --> Frontier
 ```
 This is fundamentally **BFS**: the frontier is the queue, fetched links are neighbors pushed back.
+
+```mermaid
+flowchart TD
+    Dequeue["Dequeue URL<br/>from frontier"] --> Robots{"robots.txt<br/>allows?"}
+    Robots -- "no" --> Drop1["Drop"]
+    Robots -- "yes" --> Fetch["Fetch"]
+    Fetch --> Parse["Parse"]
+    Parse --> Seen{"Content already<br/>seen? (hash)"}
+    Seen -- "yes" --> Skip["Skip store"]
+    Seen -- "no" --> Store["Store"]
+    Parse --> Extract["Extract links"]
+    Extract --> UrlSeen{"URL seen?<br/>(Bloom filter)"}
+    UrlSeen -- "yes" --> Drop2["Drop"]
+    UrlSeen -- "no" --> Enqueue["Enqueue to frontier"]
+```
 
 ## Step 6 — Deep dives
 
@@ -48,6 +67,16 @@ This is fundamentally **BFS**: the frontier is the queue, fetched links are neig
     queue**, and a worker handles one host at a time with a crawl-delay. This per-host queueing
     is the classic politeness mechanism.
 - Frontier is distributed and persistent (survives restarts; billions of pending URLs).
+
+```mermaid
+flowchart TD
+    Router["Router<br/>(map URL by host)"] --> QA[("Host A queue")]
+    Router --> QB[("Host B queue")]
+    QA --> WA["Worker A<br/>(honors crawl-delay,<br/>one host at a time)"]
+    QB --> WB["Worker B<br/>(honors crawl-delay,<br/>one host at a time)"]
+    WA --> FetchA["Fetch host A"]
+    WB --> FetchB["Fetch host B"]
+```
 
 ### Deduplication (two kinds — both critical at scale)
 - **URL dedup**: have we already seen/scheduled this URL? A massive set of seen URLs. Use a

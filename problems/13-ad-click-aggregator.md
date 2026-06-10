@@ -32,11 +32,22 @@ GET  /metrics?adId=&from=&to=&granularity=minute&groupBy=region  -> aggregated c
 Ingestion is fire-and-forget-fast; querying hits precomputed aggregates.
 
 ## Step 5 — High-level design (stream pipeline + Lambda architecture)
-```
-Clients → Ingestion (LB + thin collectors) → [ Kafka ]  (durable, partitioned buffer)
-   → Stream processor (Flink/Spark Streaming): windowed aggregation (per ad per minute)
-   → write rollups to a fast OLAP / time-series store  → Query service → dashboards
-   (Batch path) raw events in data lake → periodic exact recompute → corrects/​reconciles
+```mermaid
+flowchart LR
+    Clients(["Clients"])
+    Collectors["Ingestion<br/>(LB + thin collectors)"]
+    Kafka[("Kafka<br/>durable, partitioned by adId")]
+    Processor["Stream processor<br/>(Flink/Spark)<br/>windowed aggregation, checkpointed"]
+    OLAP[("OLAP / time-series store<br/>rollups")]
+    QuerySvc["Query service"]
+    Dashboards(["Dashboards"])
+
+    Clients --> Collectors
+    Collectors --> Kafka
+    Kafka --> Processor
+    Processor -- "write rollups" --> OLAP
+    OLAP --> QuerySvc
+    QuerySvc --> Dashboards
 ```
 
 ### Why Kafka in the middle
@@ -53,6 +64,22 @@ aggregation parallelizes across partitions.
   recover after a crash without losing or double-counting — the basis of correctness.
 
 ### Exactly-once counting (the accuracy crux)
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Collector
+    participant Kafka
+    participant Processor as "Stream processor"
+    participant Store as "Aggregate store"
+
+    Client->>Collector: "event (unique event ID)"
+    Collector->>Kafka: "publish event"
+    Kafka->>Processor: "consume event"
+    Processor->>Processor: "dedup by event ID within window"
+    Processor->>Processor: "update windowed counter (checkpointed)"
+    Processor->>Store: "on window close: idempotent write (replace, not increment)"
+    Note over Client,Store: "at-least-once delivery + idempotent writes = effective exactly-once"
+```
 - Ingestion is at-least-once (Kafka redelivery, client retries) → naive counting **over-counts**.
 - Achieve effective exactly-once via:
   - **Idempotent events**: each event has a unique ID; dedup within the processing window.
@@ -62,6 +89,26 @@ aggregation parallelizes across partitions.
     not incrementing, so reprocessing a window is safe).
 
 ### Lambda architecture (speed vs accuracy)
+```mermaid
+flowchart LR
+    Kafka[("Kafka<br/>event source")]
+    subgraph Speed["Speed layer"]
+        Stream["Stream processing<br/>fast, approximate, near-real-time"]
+    end
+    subgraph Batch["Batch layer"]
+        Lake[("Data lake<br/>raw events")]
+        Recompute["Periodic exact recompute<br/>authoritative for billing"]
+    end
+    Serving["Serving layer<br/>(merge)"]
+    Dashboards(["Dashboards"])
+
+    Kafka --> Stream
+    Kafka --> Lake
+    Lake --> Recompute
+    Stream --> Serving
+    Recompute --> Serving
+    Serving --> Dashboards
+```
 - **Speed layer (streaming)**: fast, approximate-ish, near-real-time numbers for dashboards.
 - **Batch layer**: periodically reprocesses the **raw event log** for **exact** results (handles
   late events, dedup, corrections) → authoritative for **billing**.

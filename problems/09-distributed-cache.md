@@ -32,10 +32,26 @@ Client library (smart client) knows the node topology and routes directly to the
 no proxy hop.
 
 ## Step 5 — High-level design
-```
-App ⇄ Cache client (consistent-hash router) ⇄ Cache node cluster (sharded)
-                                                  each node: hash map + eviction + TTL
-                  Topology/membership: gossip or a coordination service (ZK/etcd)
+```mermaid
+flowchart LR
+    App(["App"])
+    Client["Cache Client<br/>(consistent-hash router)"]
+    Coord[("Coordination Service<br/>ZooKeeper / etcd<br/>(membership + topology)")]
+
+    subgraph Cluster["Cache Node Cluster (sharded)"]
+        S1P[("Shard 1<br/>Primary")]
+        S1R[("Shard 1<br/>Replica")]
+        S2P[("Shard 2<br/>Primary")]
+        S2R[("Shard 2<br/>Replica")]
+    end
+
+    App <--> Client
+    Client -- "route by ring" --> S1P
+    Client -- "route by ring" --> S2P
+    S1P -- "async replicate" --> S1R
+    S2P -- "async replicate" --> S2R
+    Client -. "topology" .-> Coord
+    Cluster -. "membership" .-> Coord
 ```
 - **Single node** = a big in-memory **hash map** (O(1) get/put) + an **eviction policy
   structure** + TTL handling.
@@ -51,11 +67,46 @@ App ⇄ Cache client (consistent-hash router) ⇄ Cache node cluster (sharded)
   support for heterogeneous capacity. This is the textbook reason to know consistent hashing.
 - The **smart client** (or a proxy like twemproxy) computes the ring and routes directly.
 
+```mermaid
+flowchart TD
+    K(["Key K"])
+    N1[("N1")]
+    N2[("N2")]
+    N3[("N3")]
+    Note["Adding/removing a node moves only ~1/N keys.<br/>Virtual nodes spread each physical node across<br/>many ring positions to even out distribution."]
+
+    N1 -- "clockwise" --> N2
+    N2 -- "clockwise" --> N3
+    N3 -- "clockwise" --> N1
+    K -- "maps to next node clockwise" --> N2
+    N2 -.- Note
+```
+
 ### Eviction (single-node data structure)
 - **LRU** via a **hash map + doubly linked list**: map key→node; on access move node to head;
   evict from tail when full. O(1) get/put/evict. This is the classic implementation to be able
   to sketch.
 - Alternatives: **LFU** (frequency-based), **TTL**-driven. Mention LRU as default.
+
+```mermaid
+flowchart LR
+    Map["HashMap<br/>(key &rarr; node)"]
+    Head["MRU Head"]
+    A["Node A"]
+    B["Node B"]
+    Tail["LRU Tail"]
+
+    Accessed(["Accessed item"])
+    Evict(["Evicted"])
+
+    Map -- "O(1) lookup" --> A
+    Map -- "O(1) lookup" --> B
+    Head <--> A
+    A <--> B
+    B <--> Tail
+    Accessed -- "move to head" --> Head
+    Tail -- "evict when full" --> Evict
+```
 
 ### TTL expiration
 - **Lazy**: check expiry on access, drop if expired.

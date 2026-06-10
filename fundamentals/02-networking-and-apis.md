@@ -5,8 +5,25 @@ traffic is spread, and how clients talk to your service.
 
 ## The request path
 
-```
-Client → DNS resolve → (CDN edge) → Load Balancer → Reverse Proxy → App servers → ...
+```mermaid
+flowchart LR
+    Client(["Client"])
+    DNS["DNS resolve"]
+    CDN["CDN edge"]
+    LB["Load Balancer"]
+    Proxy["Reverse proxy"]
+    App["App servers"]
+    Cache[("Cache")]
+    DB[("Database")]
+
+    Client -- "1. resolve name" --> DNS
+    DNS -- "2. IP address" --> Client
+    Client -- "3. request" --> CDN
+    CDN -- "4. on miss" --> LB
+    LB --> Proxy
+    Proxy --> App
+    App --> Cache
+    App --> DB
 ```
 
 ### DNS
@@ -58,6 +75,21 @@ ring; a key maps to the next server clockwise. Adding/removing a node only moves
 arc → ~1/N keys move. Use **virtual nodes** (each physical node gets many ring positions) to
 even out distribution and handle heterogeneous capacity. This underpins distributed caches,
 Cassandra/DynamoDB partitioning, and sharded routing.
+
+```mermaid
+flowchart TD
+    K(["Key K"])
+    N1["Node N1"]
+    N2["Node N2"]
+    N3["Node N3"]
+
+    K -- "maps to next node<br/>clockwise" --> N2
+    N1 -- "ring (clockwise)" --> N2
+    N2 -- "ring (clockwise)" --> N3
+    N3 -- "ring (clockwise)" --> N1
+
+    Note["Add/remove a node moves only ~1/N keys<br/>Virtual nodes give each node many ring<br/>positions to even out load"]
+```
 
 ## Stateless vs stateful servers
 - **Stateless app servers** are the default: any server can handle any request; scale by

@@ -13,6 +13,15 @@ serving popular data from fast storage (RAM, edge) instead of slow storage (disk
 Each layer that absorbs a request shields everything behind it. Push caching as far toward
 the client as correctness allows.
 
+```mermaid
+flowchart LR
+    Client(["Client / browser cache"]) -- "miss" --> CDN["CDN / edge"]
+    CDN -- "miss" --> Proxy["Reverse-proxy cache"]
+    Proxy -- "miss" --> App[("Application cache<br/>(Redis)")]
+    App -- "miss" --> DBCache["Database cache<br/>(buffer pool)"]
+    DBCache -- "miss" --> DB[("Database")]
+```
+
 ## Local vs distributed cache
 - **Local (in-process)**: fastest (no network hop), but each server has its own copy →
   duplication, inconsistency, and cold caches on deploy. Good for tiny, hot, read-mostly data.
@@ -26,6 +35,16 @@ the client as correctness allows.
 - **Cache-aside (lazy loading)** — most common. App checks cache; on miss, reads DB, then
   populates cache. Pros: only requested data is cached; cache failure is survivable. Cons:
   first request per key is slow (miss penalty); risk of stale data until TTL/invalidation.
+
+```mermaid
+flowchart TD
+    Start(["App requests key"]) --> Check[("Read cache")]
+    Check --> Hit{"Cache hit?"}
+    Hit -- "yes" --> Return["Return from cache"]
+    Hit -- "no" --> ReadDB[("Read DB")]
+    ReadDB --> Populate[("Populate cache")]
+    Populate --> ReturnDB["Return value"]
+```
 - **Read-through** — app talks only to the cache; the cache library loads from DB on miss.
   Cleaner app code; cache becomes a dependency.
 
@@ -68,6 +87,16 @@ Mitigations:
 - **Early/probabilistic recomputation**: refresh slightly *before* expiry.
 - **Locking**: first miss takes a lock to repopulate; others serve stale or wait.
 - **Stagger TTLs with jitter** so keys don't expire in lockstep.
+
+```mermaid
+flowchart TD
+    Expire(["Hot key expires"]) --> Reqs["Many concurrent requests"]
+    Reqs --> Miss{"Cache hit?"}
+    Miss -- "no (all miss)" --> Herd["Thundering herd"]
+    Herd --> DB[("Database overloaded")]
+    Mitigation["Single-flight / request coalescing<br/>+ jittered TTL"] -- "shields" --> DB
+    Reqs -. "coalesce" .-> Mitigation
+```
 
 ### Cache penetration
 Requests for keys that **don't exist** always miss and hit the DB (often an attack).

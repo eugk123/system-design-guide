@@ -58,6 +58,19 @@ Keep copies of data on multiple nodes for **availability**, **read scaling**, an
   doesn't see their change. Fix: route the user's reads to the leader for a window, or track a
   version/timestamp and read from a caught-up replica.
 
+```mermaid
+flowchart LR
+  App["App"]
+  Leader[("Leader")]
+  F1[("Follower 1")]
+  F2[("Follower 2")]
+  App -- "all writes" --> Leader
+  Leader -- "replicate (async/sync)" --> F1
+  Leader -- "replicate (async/sync)" --> F2
+  F1 -- "reads" --> App
+  F2 -- "reads" --> App
+```
+
 ### Multi-leader / leader-less
 - **Multi-leader**: accept writes in multiple regions → low write latency everywhere, but
   **write conflicts** need resolution (last-write-wins, CRDTs, app logic).
@@ -66,9 +79,38 @@ Keep copies of data on multiple nodes for **availability**, **read scaling**, an
   strong-ish consistency.** Tune W/R for the read/write balance you want. Repair via
   read-repair and anti-entropy (Merkle trees).
 
+```mermaid
+flowchart TD
+  Writer["Writer"]
+  Reader["Reader"]
+  R1[("Replica 1")]
+  R2[("Replica 2")]
+  R3[("Replica 3")]
+  Writer -- "write (acked by W=2)" --> R1
+  Writer -- "write (acked by W=2)" --> R2
+  Reader -- "read (R=2)" --> R2
+  Reader -- "read (R=2)" --> R3
+  R2 -- "overlap guarantees latest value<br/>W + R > N (2 + 2 > 3)" --> Reader
+```
+
 ## Sharding (horizontal partitioning)
 
 Split data across nodes when it no longer fits / can't be served by one machine.
+
+```mermaid
+flowchart TD
+  Rows["Incoming rows"]
+  Router{"Router<br/>hash(key)"}
+  S1[("Shard 1")]
+  S2[("Shard 2")]
+  S3[("Shard 3")]
+  Rows --> Router
+  Router -- "hash(key)" --> S1
+  Router -- "hash(key)" --> S2
+  Router -- "hash(key)" --> S3
+  Note["Even distribution + query locality;<br/>consistent hashing to reshard"]
+  Router -.-> Note
+```
 
 ### Strategies
 - **Range partitioning**: by key range (A–F, G–M…). Supports range scans, but risks

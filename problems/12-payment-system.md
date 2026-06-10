@@ -36,12 +36,25 @@ POST /payments/{id}/refund  Idempotency-Key: <uuid> -> { refundId, status }
 important interface decision.
 
 ## Step 5 — High-level design
-```
-Client → Payment service (validate, idempotency check, create record)
-            → Ledger (double-entry) [transactional with payment record]
-            → enqueue → PSP worker → external PSP / bank rails (with retries)
-            ← webhook/callback from PSP → update final status
-        Reconciliation job: compare our ledger vs PSP settlement reports (out of band)
+```mermaid
+flowchart LR
+    Client(["Client"])
+    PaymentSvc["Payment Service<br/>(validate, idempotency check,<br/>create record)"]
+    Ledger[("Ledger DB<br/>(double-entry + payment record,<br/>one transaction)")]
+    Outbox["Outbox / Queue"]
+    Worker["PSP Worker<br/>(retries)"]
+    PSP["External PSP / Bank rails"]
+    Recon["Reconciliation Job<br/>(out of band)"]
+
+    Client -- "POST /payments" --> PaymentSvc
+    PaymentSvc -- "atomic write" --> Ledger
+    PaymentSvc -- "intent to charge" --> Outbox
+    Outbox --> Worker
+    Worker -- "charge (idempotency key)" --> PSP
+    PSP -- "webhook / callback" --> PaymentSvc
+    PaymentSvc -- "update status" --> Ledger
+    Recon -- "compare ledger" --> Ledger
+    Recon -- "vs settlement report" --> PSP
 ```
 
 ## Step 6 — Deep dives
@@ -54,9 +67,46 @@ Client → Payment service (validate, idempotency check, create record)
   don't double-charge at their end either. **At-least-once everywhere + idempotency = effective
   exactly-once.**
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant P as Payment Service
+    participant PSP as PSP / Bank
+    C->>P: POST /payments (Idempotency-Key)
+    alt key already seen
+        P-->>C: return original result (no re-charge)
+    else new key
+        P->>P: persist pending record + ledger entry (one txn)
+        Note over P: persist before calling PSP;<br/>at-least-once + idempotency = effective exactly-once
+        P->>PSP: charge (with idempotency key)
+        PSP-->>P: result (succeeded / failed)
+        P->>P: update status
+        P-->>C: return result
+    end
+```
+
 ### State machine & durability
 - Model a payment as an explicit **state machine**: `created → pending → (succeeded | failed) →
   [refunded]`. Only legal transitions allowed; persist every transition.
+
+```mermaid
+stateDiagram-v2
+    [*] --> created
+    created --> pending: call PSP
+    pending --> succeeded: PSP success
+    pending --> failed: PSP failure
+    succeeded --> refunded: refund
+    pending --> unknown: timeout / no response
+    unknown --> querying: query PSP
+    querying --> succeeded: resolved success
+    querying --> failed: resolved failure
+    refunded --> [*]
+    failed --> [*]
+    note right of unknown
+        "unknown" is never guessed —
+        always resolved by querying the PSP
+    end note
+```
 - **Never lose in-flight state**: persist *before* calling the PSP, so a crash mid-call leaves a
   recoverable `pending` record you can resolve (query the PSP for the real outcome) rather than a
   lost payment.

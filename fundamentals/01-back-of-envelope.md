@@ -45,6 +45,22 @@ a photo ~0.5–2 MB, a minute of video (compressed) ~5–50 MB.
 
 ## The estimation method (5 steps)
 
+```mermaid
+flowchart TD
+    Start(["Start: DAU (daily active users)"])
+    Actions["Actions per user/day<br/>(e.g. reads 20, writes 2)"]
+    QPS["QPS = actions/day ÷ 86,400<br/>(round 86,400 → 10^5)"]
+    Peak["Peak QPS = avg × peak factor<br/>(2× smooth, up to 10× spiky)"]
+    Derive["Derive storage + bandwidth<br/>(QPS × payload × retention)"]
+    Output(["Numbers that justify the design"])
+
+    Start --> Actions
+    Actions --> QPS
+    QPS --> Peak
+    Peak --> Derive
+    Derive --> Output
+```
+
 1. **Start from users.** DAU (daily active users). If given MAU, DAU ≈ MAU × (0.2–0.5).
 2. **Actions per user per day.** e.g. a user reads 20 posts, writes 2.
 3. **QPS = actions/day ÷ 86,400.** Round 86,400 to ~100,000 (10^5) for mental math.

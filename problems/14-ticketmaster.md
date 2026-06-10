@@ -33,13 +33,25 @@ DELETE /reservations/{id}                 -> release hold
 ```
 
 ## Step 5 — High-level design
-```
-Client → LB → API → [ Booking service ]
-                        │  inventory state machine: AVAILABLE → HELD → BOOKED
-                        ▼
-                Inventory DB (strongly consistent)  +  Redis (holds + locks + TTL)
-                Payment service (Problem 12) ; Queue for confirmations/notifications
-   Browse path: seat map served from cache (eventually consistent is fine for display)
+```mermaid
+flowchart LR
+    Client(["Client"])
+    LB["Load Balancer"]
+    WaitingRoom["Virtual Waiting Room<br/>(queue for flash sales)"]
+    Booking["Booking Service"]
+    Payment["Payment Service"]
+    InvDB[("Inventory DB<br/>(strongly consistent)")]
+    Redis[("Redis<br/>(holds + TTL)")]
+    Cache[("Seat Map Cache<br/>(eventually consistent)")]
+
+    Client -- "browse" --> LB
+    Client -- "reserve / confirm" --> LB
+    LB -- "browse path" --> Cache
+    LB -- "buy path" --> WaitingRoom
+    WaitingRoom -- "admit in batches" --> Booking
+    Booking -- "atomic holds" --> Redis
+    Booking -- "BOOKED (txn)" --> InvDB
+    Booking -- "charge" --> Payment
 ```
 
 ## Step 6 — Deep dives
@@ -48,6 +60,16 @@ Client → LB → API → [ Booking service ]
 Each seat: **AVAILABLE → HELD (temporary, with TTL) → BOOKED (permanent)** — plus HELD → AVAILABLE
 on expiry/release. All transitions must be **atomic and conflict-free**. This explicit lifecycle
 is the backbone.
+
+```mermaid
+stateDiagram-v2
+    [*] --> AVAILABLE
+    AVAILABLE --> HELD: reserve (set TTL)
+    HELD --> BOOKED: confirm / payment
+    HELD --> AVAILABLE: hold TTL expires (auto-release)
+    HELD --> AVAILABLE: explicit release
+    BOOKED --> [*]
+```
 
 ### Preventing double-booking — concurrency control (the heart)
 Several valid approaches; know the tradeoffs:
@@ -79,6 +101,28 @@ Several valid approaches; know the tradeoffs:
 3. Confirm: verify the hold is still valid (fencing token), move HELD → BOOKED in the DB
    transactionally, finalize. If the hold expired → fail and ask the user to retry.
 4. Abandon/expiry: hold TTL lapses → seat returns to AVAILABLE automatically.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant B as Booking Service
+    participant R as Redis
+    participant P as Payment Service
+    participant DB as Inventory DB
+
+    C->>B: reserve seats
+    B->>R: atomic hold (SET NX EX, with TTL)
+    R-->>B: ok
+    B-->>C: reservationId + expiresAt
+    C->>P: pay (idempotent)
+    P-->>C: success
+    C->>B: confirm
+    B->>B: verify hold valid (fencing token)
+    B->>DB: move HELD to BOOKED (txn)
+    DB-->>B: ok
+    B-->>C: bookingId
+    Note over R,DB: TTL auto-releases abandoned carts; never oversell
+```
 
 ### Handling the flash-sale spike (the load crux)
 - **Virtual waiting room / queue**: admit users to the buying flow in **controlled batches** so

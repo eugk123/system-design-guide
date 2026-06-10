@@ -15,6 +15,15 @@ In the presence of a network **P**artition, a distributed system must choose bet
   stale data; reconcile later. Choose when uptime > strict freshness (feeds, carts,
   DNS, shopping recommendations). Examples: Cassandra, DynamoDB, Riak.
 
+```mermaid
+flowchart TD
+  P["Distributed system under a network Partition"]
+  P -- "choose one" --> CP["CP: stay consistent,<br/>refuse some requests<br/>(e.g. ZooKeeper, RDBMS)"]
+  P -- "choose one" --> AP["AP: stay available,<br/>serve possibly-stale<br/>(e.g. Cassandra, Dynamo)"]
+  CP --> CPout["Some nodes return errors<br/>(correctness over uptime)"]
+  AP --> APout["All nodes answer,<br/>reconcile later<br/>(uptime over freshness)"]
+```
+
 **Crucial nuance:** CAP only governs behavior *during a partition*. The choice is not global
 or all-or-nothing — modern systems are **tunable** (e.g. Cassandra per-query consistency
 levels) and you can make different choices per operation.
@@ -29,6 +38,17 @@ answer from the nearest replica (fast, maybe stale)?* PACELC captures what you a
 99.9% of the time.
 
 ## Consistency models (strongest → weakest)
+
+```mermaid
+flowchart LR
+  S["Strong /<br/>Linearizable"] --> SC["Sequential /<br/>Causal"]
+  SC --> RYW["Read-your-writes"]
+  RYW --> MR["Monotonic reads"]
+  MR --> E["Eventual"]
+  L["stronger =<br/>more coordination / latency"] -.-> S
+  E -.-> R["weaker =<br/>cheaper / more available"]
+```
+
 - **Linearizable / strong**: every read sees the most recent write; the system behaves as if
   there's a single copy. Requires coordination → higher latency, lower availability. Needed
   for locks, leader election, unique constraints, balances.
@@ -76,6 +96,16 @@ distributed locks, config management, and replicated logs.
     followers; an entry is **committed** once a **majority** persists it, then applied.
   - **Safety via majority quorums**: needs **N/2 + 1** nodes up → use odd cluster sizes (3, 5).
     A 3-node cluster tolerates 1 failure; 5 tolerates 2.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Follower
+  Follower --> Candidate: "election timeout"
+  Candidate --> Leader: "wins majority vote"
+  Candidate --> Follower: "discovers leader / new term"
+  Leader --> Follower: "discovers higher term"
+```
+
 - You rarely implement consensus yourself — you **use** it via **ZooKeeper / etcd / Consul**
   for coordination (leader election, locks, service discovery, config). Know when to reach for
   them, and that they're CP (they sacrifice availability to stay consistent).

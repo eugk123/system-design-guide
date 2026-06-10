@@ -37,16 +37,22 @@ receipts: delivered/read events flow back the same way
 ```
 
 ## Step 5 — High-level design
-```
-Client ⇄ (WebSocket) ⇄ Chat Gateway (stateful, holds connections)
-                              │
-                    ┌─────────┼───────────────┐
-                    ▼         ▼                ▼
-              Presence    Message Service   Session registry
-              service     (store + route)   (userId→gateway, in Redis)
-                              │
-                              ▼
-                       Message store (Cassandra) + Queue for fan-out/offline
+```mermaid
+flowchart LR
+    Client(["Client"])
+    Gateway["Chat Gateway<br/>(stateful, holds connections)"]
+    Presence["Presence service"]
+    MsgSvc["Message service<br/>(store + route)"]
+    Registry[("Session registry (Redis)<br/>userId → gateway")]
+    Store[("Message store<br/>(Cassandra)")]
+    Queue[("Queue<br/>fan-out / offline")]
+
+    Client <-- "WebSocket" --> Gateway
+    Gateway --> Presence
+    Gateway --> MsgSvc
+    Gateway --> Registry
+    MsgSvc --> Store
+    MsgSvc --> Queue
 ```
 
 ### Send path (1:1)
@@ -59,6 +65,28 @@ Client ⇄ (WebSocket) ⇄ Chat Gateway (stateful, holds connections)
    acks → emit **delivered** receipt back to sender.
 5. If offline → the message is already persisted; deliver on reconnect (and trigger a push
    notification).
+
+```mermaid
+sequenceDiagram
+    actor Sender
+    participant GA as "Gateway A"
+    participant MS as "Message service"
+    participant Store as "Message store"
+    participant Reg as "Session registry"
+    participant GB as "Gateway B"
+    actor Recipient
+
+    Sender->>GA: send message
+    GA->>MS: route message
+    MS->>Store: persist (assign messageId)
+    Note over MS,Store: persist before deliver = durability
+    MS-->>Sender: ✓ sent
+    MS->>Reg: lookup recipient gateway
+    MS->>GB: route to recipient gateway
+    GB->>Recipient: push over WebSocket
+    Recipient-->>GB: ack
+    GB-->>Sender: delivered receipt
+```
 
 ### Why persist before delivering
 Durability: the message survives even if the recipient is offline or a gateway crashes
@@ -82,6 +110,29 @@ mid-delivery. The store is the source of truth; the WebSocket is just transport.
   conversation, horizontal scale → ideal here.
 - **Per-user inbox / offline queue**: a list of undelivered messageIds per recipient, drained
   on reconnect.
+
+```mermaid
+erDiagram
+    USER ||--o{ MESSAGE : sends
+    CONVERSATION ||--o{ MESSAGE : "partitioned by conversationId"
+    USER }o--o{ CONVERSATION : "participates in"
+    MESSAGE {
+        string conversationId PK "partition key"
+        string messageId PK "clustering key, time-sorted"
+        string senderId FK
+        string body
+        timestamp ts
+    }
+    CONVERSATION {
+        string conversationId PK
+        string type "1:1 or group"
+    }
+    USER {
+        string userId PK
+        string status
+        timestamp lastSeen
+    }
+```
 
 ### Ordering
 Per-conversation ordering via the time-sortable clustering key (and a per-conversation

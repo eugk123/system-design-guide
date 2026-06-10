@@ -34,12 +34,25 @@ GET  /changes?cursor=...     -> delta of changes since cursor (for sync)
 ```
 
 ## Step 5 — High-level design — separate metadata from content
-```
-Client (with local sync agent + watcher)
-   ⇅
-[ Metadata service ]  files, folders, versions, chunk lists, sharing, device cursors  (DB)
-[ Block/content service ] → Blob store (chunks), fronted by CDN for downloads
-[ Notification service ] → tells other devices "you have changes" (long-poll / WebSocket)
+```mermaid
+flowchart LR
+    Client(["Client / Sync Agent<br/>(watcher)"])
+    Meta["Metadata Service<br/>files, versions,<br/>chunk lists, sharing"]
+    MetaDB[("Metadata DB")]
+    Block["Block / Content Service"]
+    Blob[("Blob Store<br/>(chunks)")]
+    CDN["CDN"]
+    Notif["Notification Service"]
+    OtherDevices(["Other Devices"])
+
+    Client -- "chunk hashes, commit version" --> Meta
+    Meta --> MetaDB
+    Client -- "upload / download chunks" --> Block
+    Block --> Blob
+    CDN -- "cached downloads" --> Client
+    Blob --> CDN
+    Meta -- "change events" --> Notif
+    Notif -- "you have changes" --> OtherDevices
 ```
 The **key architectural split**: **metadata** (small, transactional, consistency-critical → a
 database) vs **file content** (huge, immutable blobs → object store). They scale and behave
@@ -57,6 +70,51 @@ completely differently.
   those. This is why Dropbox feels fast on edits.
 - A file = an ordered **list of chunk hashes** in metadata; content is just deduped chunks in the
   blob store.
+
+```mermaid
+sequenceDiagram
+    participant C as Client / Sync Agent
+    participant M as Metadata Service
+    participant B as Block Service
+    participant S as Blob Store
+
+    C->>C: Split file into chunks + hash each
+    C->>M: Send chunk hashes (dedup check)
+    M-->>C: Which chunks are missing
+    C->>B: Upload ONLY missing chunks
+    B->>S: Store chunks
+    C->>M: Commit file version (= ordered chunk list)
+    Note over C,M: Commit metadata only after all<br/>chunks land -> no corrupt state
+```
+
+**Data model** — content-addressed dedup: a `CHUNK` (keyed by content hash) can be referenced by
+many files; `FILE_CHUNK` records the ordered list of chunk hashes that make up a file version.
+
+```mermaid
+erDiagram
+    USER ||--o{ FILE : owns
+    FILE ||--o{ FILE_CHUNK : "ordered list of"
+    CHUNK ||--o{ FILE_CHUNK : "shared across files"
+
+    USER {
+        string userId PK
+        string name
+    }
+    FILE {
+        string fileId PK
+        string name
+        int version
+    }
+    CHUNK {
+        string hash PK
+        int size
+    }
+    FILE_CHUNK {
+        string fileId FK
+        string hash FK
+        int position
+    }
+```
 
 ### Sync mechanism
 - **Client sync agent** watches the local folder for changes, chunks them, and uploads deltas;

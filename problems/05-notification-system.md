@@ -32,16 +32,25 @@ Often the real "API" is **events** consumed off a bus (e.g. "order_shipped" → 
 not just direct calls.
 
 ## Step 5 — High-level design
-```
-Producers (services/events) → Notification API/Ingestion
-        → enqueue → [ Notification Service ]
-                        │  (dedupe, fetch prefs, rate-limit, render template)
-                        ▼
-              Per-channel queues (push / sms / email)  ← decouple per channel
-                        ▼
-              Channel workers/senders → 3rd-party providers (APNs, FCM, Twilio, SES)
-                        ▼
-              Delivery status / retries / DLQ ; analytics events
+```mermaid
+flowchart LR
+    Producers(["Producers<br/>(services / events)"]) --> API["Notification API<br/>/ Ingestion"]
+    API --> Svc["Notification Service<br/>(dedupe, fetch prefs,<br/>rate-limit, render template)"]
+    Svc --> PushQ[("Push queue")]
+    Svc --> SmsQ[("SMS queue")]
+    Svc --> EmailQ[("Email queue")]
+    PushQ --> PushW["Push worker"]
+    SmsQ --> SmsW["SMS worker"]
+    EmailQ --> EmailW["Email worker"]
+    PushW --> APNs["APNs / FCM"]
+    SmsW --> Twilio["Twilio"]
+    EmailW --> SES["SES"]
+    PushW -- "permanent failures" --> DLQ[("Dead-Letter Queue")]
+    SmsW -- "permanent failures" --> DLQ
+    EmailW -- "permanent failures" --> DLQ
+    PushW --> Status[("Delivery-status store")]
+    SmsW --> Status
+    EmailW --> Status
 ```
 
 ### Flow
@@ -52,6 +61,17 @@ Producers (services/events) → Notification API/Ingestion
 4. **Enqueue** into the appropriate **per-channel queue** (Kafka/SQS). Returns fast.
 5. **Channel workers** pull and call the **third-party provider**; record delivery status;
    retry transient failures; DLQ permanent failures.
+
+```mermaid
+flowchart TD
+    Req(["Incoming request / event"]) --> Dedupe["Dedupe<br/>(idempotency key)"]
+    Dedupe --> OptIn{"User opted in?"}
+    OptIn -- "no" --> Drop1["Drop"]
+    OptIn -- "yes" --> Limit{"Within rate limit<br/>/ quiet hours?"}
+    Limit -- "no" --> Defer["Defer / drop"]
+    Limit -- "yes" --> Render["Render template"]
+    Render --> Enqueue[("Enqueue to channel queue")]
+```
 
 ## Step 6 — Deep dives
 
@@ -70,6 +90,17 @@ Two lanes: a **high-priority** path (OTP, security — low latency, jump the que
 Separate queues or priority queues.
 
 ### Reliability & idempotency (the heart of it)
+```mermaid
+stateDiagram-v2
+    [*] --> queued
+    queued --> sent
+    sent --> delivered
+    sent --> failed
+    failed --> sent: retry
+    failed --> DLQ: after N retries
+    delivered --> [*]
+    DLQ --> [*]
+```
 - **At-least-once** delivery: workers retry on transient provider failures with exponential
   backoff + jitter; **DLQ** after N attempts for inspection/manual replay.
 - **Idempotency / dedup**: each notification has a unique key; track sent IDs (dedup store with

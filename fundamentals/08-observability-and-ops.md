@@ -16,6 +16,18 @@ isn't done when it works in the happy path — it's done when you can *run* it, 
 
 Metrics tell you *something is wrong*; traces tell you *where*; logs tell you *why*.
 
+```mermaid
+flowchart TD
+    Services["Instrumented services / apps"]
+    Services -- "numeric time series" --> Metrics["Metrics<br/>(counters, gauges, histograms)"]
+    Services -- "structured events" --> Logs["Logs<br/>(structured JSON events)"]
+    Services -- "spans with timing" --> Traces["Traces<br/>(request across services)"]
+    Metrics -- "alerting" --> Backend[("Observability backend / dashboards")]
+    Logs -- "search" --> Backend
+    Traces -- "find where latency/errors are" --> Backend
+    Backend --> Insight["Metrics: something is wrong<br/>Traces: where<br/>Logs: why"]
+```
+
 ## The golden signals (what to alert on)
 - **Latency** — p50 / p95 / p99 / p99.9. **Always look at tail latency, not averages** — the
   mean hides the users having a terrible time. Tail latency is amplified by fan-out (a request
@@ -34,6 +46,16 @@ Metrics tell you *something is wrong*; traces tell you *where*; logs tell you *w
 - **Error budget**: 100% − SLO. If your SLO is 99.9%, you have 0.1% to "spend" on
   failures/risky deploys. Frames the tension between reliability and velocity: budget left →
   ship faster; budget burned → freeze and stabilize.
+
+```mermaid
+flowchart LR
+    SLI["SLI<br/>(measured quantity)"] -- "internal target" --> SLO["SLO<br/>(internal target)"]
+    SLO -- "external promise, SLA &le; SLO" --> SLA["SLA<br/>(contractual promise)"]
+    SLO -- "100% &minus; SLO" --> Budget["Error budget"]
+    Budget --> Decision{"Budget remaining?"}
+    Decision -- "budget left" --> Ship["Ship faster"]
+    Decision -- "budget burned" --> Freeze["Freeze and stabilize"]
+```
 
 ## Health checks & self-healing
 - **Liveness** (is the process alive — restart if not) vs **readiness** (is it ready to serve

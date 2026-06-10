@@ -33,6 +33,18 @@ add redundancy:
   utilization and instant failover, but needs conflict handling / shared state.
 - Apply to every tier: multiple LBs, multiple app servers, DB replicas, multi-AZ, multi-region.
 
+```mermaid
+flowchart LR
+    Client["Client"] --> LB["Load Balancer"]
+    LB --> A1["App Server 1<br/>(stateless)"]
+    LB --> A2["App Server 2<br/>(stateless)"]
+    LB --> A3["App Server 3<br/>(stateless)"]
+    A2 -. "dies" .-> Dead["X (down)"]
+    LB -- "absorb its load" --> A1
+    LB -- "absorb its load" --> A3
+    Note["Any node serves any request,<br/>so survivors absorb the load"]
+```
+
 ## Multi-region / geo-distribution
 - **Why**: lower latency (serve near users), disaster recovery, data residency/compliance.
 - **Active-passive (DR)**: one region serves, another on standby. Simpler; RPO/RTO tradeoffs.
@@ -61,6 +73,20 @@ add redundancy:
 - **Circuit breaker**: after N consecutive failures, "open" the circuit and fail fast (or serve
   fallback) instead of piling onto a sick dependency; periodically "half-open" to test recovery.
   Prevents cascading failure.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+    Closed --> Open : failure threshold exceeded
+    Open --> HalfOpen : after cooldown timer
+    HalfOpen --> Closed : test request succeeds
+    HalfOpen --> Open : test request fails
+    note right of Open
+        Open = fail fast
+        (reject calls or serve fallback)
+    end note
+```
+
 - **Timeouts**: every remote call needs one. No timeout = a slow dependency exhausts your
   threads and takes you down. Set them aggressively.
 - **Bulkheads**: isolate resources (thread pools/connection pools) per dependency so one
@@ -77,6 +103,18 @@ A common outage shape: a dependency slows → callers' threads block on it → c
 threads → callers appear down → *their* callers retry aggressively → the retry storm finishes
 off the recovering dependency. Defenses: timeouts + circuit breakers + capped jittered retries
 + bulkheads + load shedding. Mention this chain — it shows real operational experience.
+
+```mermaid
+flowchart TD
+    S1["Dependency slows down"] --> S2["Callers' threads block on it"]
+    S2 --> S3["Callers exhaust their threads"]
+    S3 --> S4["Callers appear down"]
+    S4 --> S5["Upstream retries aggressively"]
+    S5 --> S6["Retry storm finishes off<br/>the recovering dependency"]
+    S6 -. "feeds back" .-> S1
+    Defenses["Defenses:<br/>timeouts<br/>+ circuit breaker<br/>+ capped jittered retry<br/>+ bulkhead<br/>+ load shedding"]
+    Defenses -. "break the chain" .-> S2
+```
 
 ## Capacity planning & autoscaling
 - Provision for **peak**, not average; keep **headroom** (e.g. run at <70% so a node loss

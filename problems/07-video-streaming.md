@@ -38,12 +38,24 @@ Uploads go **directly to object storage via presigned URLs** (chunked, resumable
 gigabytes through your app servers.
 
 ## Step 5 — High-level design
-```
-[ Upload ]   Client → presigned URL → Blob store (raw) → enqueue → Transcoding pipeline
-[ Process ]  Transcoder: split → encode multiple renditions/codecs → segment (HLS/DASH)
-                       → write to blob store → distribute to CDN → mark video "ready"
-[ Watch ]    Client → metadata service → manifest → CDN edge → adaptive segment fetch
-[ Meta ]     Metadata DB (title, owner, status, manifest refs) + search index
+```mermaid
+flowchart LR
+    subgraph Upload
+        UClient(["Client"]) -- "presigned URL" --> RawStore[("Object Store<br/>(raw)")]
+        RawStore -- "enqueue" --> Pipeline["Transcoding<br/>pipeline"]
+    end
+    subgraph Watch
+        WClient(["Client"]) --> Meta["Metadata<br/>service"]
+        Meta -- "manifest" --> CDN["CDN edge"]
+        CDN -- "adaptive segment fetch" --> WClient
+    end
+    subgraph Metadata
+        MetaDB[("Metadata DB")]
+        Search[("Search index")]
+    end
+    Pipeline -- "encoded segments" --> CDN
+    Meta --> MetaDB
+    Meta --> Search
 ```
 
 ## Step 6 — Deep dives
@@ -70,6 +82,26 @@ gigabytes through your app servers.
   path. Use a job queue (DAG of steps), autoscale workers, make steps **idempotent** and
   retryable (DLQ for failures).
 
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API
+    participant Queue
+    participant Worker
+    participant Store as Object Store
+    participant CDN
+    Client->>API: "complete upload"
+    API->>Queue: "enqueue job"
+    Note over Queue,CDN: "async: minutes, off the request path"
+    Worker->>Queue: "pull job"
+    Worker->>Worker: "split into chunks"
+    Worker->>Worker: "transcode renditions/bitrates"
+    Worker->>Worker: "segment + generate manifest (HLS/DASH)"
+    Worker->>Store: "write segments + manifest"
+    Worker->>CDN: "distribute / pre-warm"
+    Worker->>API: "mark status ready"
+```
+
 ### Delivery: CDN + adaptive bitrate streaming (the heart of the watch side)
 - **CDN is the core of delivery.** Segments are cached at edge locations near users; the vast
   majority of bytes are served from the edge, not origin. This is what makes global streaming
@@ -78,6 +110,18 @@ gigabytes through your app servers.
   **picks the rendition matching current bandwidth/CPU**, switching segment-by-segment as
   conditions change → smooth playback, minimal buffering on flaky networks. The server just
   serves segments; the **client drives adaptation**.
+
+```mermaid
+flowchart TD
+    Manifest["Player reads manifest"] --> Measure["Measure bandwidth"]
+    Measure --> Decide{"bandwidth high?"}
+    Decide -- "yes" --> High["Fetch 1080p/4K segment"]
+    Decide -- "no" --> Low["Fetch 240p/480p segment"]
+    High --> Next["Next segment"]
+    Low --> Next
+    Next -- "loop per segment" --> Measure
+```
+
 - **Cache strategy**: popular videos pinned/pre-pushed to edges; long-tail pulled on first
   request (origin-pull) and cached. Hot new releases (Netflix) are pushed proactively.
 

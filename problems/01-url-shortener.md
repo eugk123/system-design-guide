@@ -35,13 +35,38 @@ GET  /{code}                                       -> 301/302 redirect
   control, more load. Pick **302** if analytics/control matter; mention the tradeoff.
 
 ## Step 5 — High-level design
-```
-Client → LB → API servers ──(create)──> ID generator + DB write
-                         └──(read)────> Cache (Redis) → DB
+```mermaid
+flowchart LR
+    Client(["Client"]) --> LB["Load Balancer"]
+    LB --> API["API Servers"]
+    API -- "create" --> KGS["KGS / ID Service"]
+    API -- "create: code &rarr; longUrl" --> DB[("Key-Value Store")]
+    API -- "read" --> Cache[("Redis Cache")]
+    Cache -- "miss" --> DB
+    API -- "301 / 302 redirect" --> Client
 ```
 - **Write**: generate a unique code, store `code → longURL` (+metadata) in the DB, return short URL.
 - **Read**: look up `code` in cache; on miss, read DB, populate cache, redirect. With 100:1
   read:write and a small hot set, cache hit ratio is very high → most redirects never touch the DB.
+
+```mermaid
+sequenceDiagram
+    actor Client
+    participant API as "API Server"
+    participant Cache as "Redis Cache"
+    participant DB as "Key-Value Store"
+    Client->>API: "GET /{code}"
+    API->>Cache: "lookup code"
+    alt cache hit
+        Cache-->>API: "longUrl"
+    else cache miss
+        Cache-->>API: "not found"
+        API->>DB: "read code"
+        DB-->>API: "longUrl"
+        API->>Cache: "populate cache"
+    end
+    API-->>Client: "302 redirect to longUrl"
+```
 
 ## Step 6 — Deep dive: generating the short code
 
@@ -79,6 +104,17 @@ This is the heart of the problem. Options:
 → a **KV store / wide-column (DynamoDB/Cassandra)** is ideal and scales horizontally; or
 sharded Postgres. **Shard by `code`** (hash partition) → even distribution, and every read is a
 single-shard point lookup.
+
+```mermaid
+erDiagram
+    URL_MAPPING {
+        string code PK
+        string longUrl
+        datetime createdAt
+        datetime expiry
+        string creatorId
+    }
+```
 
 ### Custom alias
 Treat as a user-provided code: check uniqueness on write (a conditional insert), reject if taken.

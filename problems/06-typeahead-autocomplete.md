@@ -33,9 +33,26 @@ cut load. Mention this — it's a real, expected optimization.
 This problem splits cleanly into a **serving path** (fast, online) and a **build path**
 (offline, slow). Drawing this separation is the key structural insight.
 
-```
-[ Serving ]  Client → CDN/edge cache → Suggest service → Trie store (in-memory) 
-[ Build  ]   Query logs → aggregation (count, time-decay) → build/rank → publish trie snapshot
+```mermaid
+flowchart LR
+    Client(["Client"])
+    subgraph Serving["Serving (online)"]
+        direction LR
+        CDN[("CDN / edge cache")]
+        Suggest["Suggest Service"]
+        Trie[("Trie store<br/>(in-memory)")]
+        CDN -- "on miss" --> Suggest
+        Suggest -- "walk to prefix" --> Trie
+    end
+    subgraph Build["Build (offline)"]
+        direction LR
+        Logs[("Query logs")]
+        Agg["Aggregation<br/>(count + time-decay)"]
+        BuildRank["Build / rank trie"]
+        Logs --> Agg --> BuildRank
+    end
+    Client -- "GET /suggest?q=prefix" --> CDN
+    BuildRank -- "publish immutable snapshot" --> Trie
 ```
 
 ## Step 6 — Deep dives
@@ -48,12 +65,45 @@ This problem splits cleanly into a **serving path** (fast, online) and a **build
   short prefixes. This is the core trick.
 - Keep the trie **in memory** for speed; it's read-mostly and rebuilt offline.
 
+```mermaid
+flowchart TD
+    root(("root"))
+    c["c"]
+    a["a"]
+    t["t"]
+    r["r"]
+    p["p"]
+    topK["prefix 'ca' top-K:<br/>cat, car, cap"]
+    root --> c --> a
+    a --> t
+    a --> r
+    a --> p
+    a -. "precomputed" .-> topK
+```
+
 ### Serving path
 - Suggest service holds the trie in RAM (or queries an in-memory store). Lookup = traverse to
   prefix node → return cached top-K.
 - **Aggressive caching**: popular prefixes' results are cached at the **CDN/edge** and in
   app-level cache. Most keystrokes hit cache, never the trie service. Hit ratio is very high
   because prefixes are heavily skewed (everyone types "fa", "the", etc.).
+
+```mermaid
+sequenceDiagram
+    participant Client as "Client (debounced)"
+    participant CDN as "CDN edge"
+    participant Suggest as "Suggest Service"
+    participant Trie as "Trie store"
+    Client ->> CDN: "GET /suggest?q=prefix"
+    alt cache hit
+        CDN -->> Client: "cached top-K"
+    else cache miss
+        CDN ->> Suggest: "forward request"
+        Suggest ->> Trie: "walk to prefix node"
+        Trie -->> Suggest: "cached top-K"
+        Suggest -->> Client: "top-K suggestions"
+    end
+```
 
 ### Build path (offline pipeline)
 - **Collect**: log every executed search query to a stream (Kafka).

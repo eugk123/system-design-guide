@@ -16,6 +16,23 @@ Rule of thumb: anything not needed to compute the user's immediate response shou
 
 ## Two shapes: message queue vs event log
 
+```mermaid
+flowchart LR
+  subgraph MQ["Message Queue (consume-once)"]
+    P1["Producer"] --> Q[("Queue")]
+    Q -- "each msg to ONE worker" --> W1["Worker 1"]
+    Q --> W2["Worker 2"]
+    W1 -- "ack &rarr; removed" --> X1["Done"]
+    W2 -- "ack &rarr; removed" --> X1
+  end
+  subgraph LOG["Distributed Log (Kafka)"]
+    P2["Producer"] --> L[("Partitioned Log<br/>(retained)")]
+    L -- "own offset" --> CG1["Consumer Group A<br/>(analytics)"]
+    L -- "own offset" --> CG2["Consumer Group B<br/>(search index)"]
+    L -- "own offset" --> CG3["Consumer Group C<br/>(notifier)"]
+  end
+```
+
 ### Message queue (RabbitMQ, SQS, ActiveMQ)
 - A message is consumed by **one** worker, then removed (or ack'd). Competing-consumers model:
   add workers to process faster.
@@ -53,6 +70,22 @@ Use for fan-out: one event → many independent reactions.
 IDs (dedup table / cache) and ignore repeats. This makes at-least-once safe.
 
 ## Operational concerns
+
+```mermaid
+flowchart TD
+  P["Producer"] --> Q[("Queue")]
+  Q --> C["Consumer processes"]
+  C --> S{"success?"}
+  S -- "yes" --> A["ack (remove)"]
+  S -- "no" --> R["retry with backoff"]
+  R --> E{"retries exhausted?"}
+  E -- "no" --> Q
+  E -- "yes" --> DLQ[("Dead-Letter Queue")]
+```
+
+> Note: default to **at-least-once delivery + idempotent consumer** (dedup by message ID), so
+> retries on the failure path are safe to reprocess.
+
 - **Acknowledgements**: consumer acks after successful processing; un-acked messages get
   redelivered. Ack *after* the work, not before.
 - **Visibility timeout** (SQS): a consumed message is hidden for a window; if not ack'd in
